@@ -1,0 +1,24 @@
+{
+  "name": "departure-board",
+  "version": "0.1.0",
+  "description": "A Solari split-flap departure board for the agent's real work: tasks flip letter by letter in amber as they board, depart, get delayed or cancelled",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Chris Dwyer",
+    "url": "https://github.com/ccdwyer"
+  },
+  "repository": "https://github.com/ccdwyer/departure-board",
+  "license": "MIT",
+  "homepage": "https://github.com/ccdwyer/departure-board",
+  "supportUrl": "https://github.com/ccdwyer/departure-board/issues",
+  "documentationUrl": "https://github.com/ccdwyer/departure-board#readme",
+  "privacyPolicyUrl": "https://github.com/ccdwyer/departure-board/blob/main/PRIVACY.md",
+  "userConfig": {
+    "clack": {
+      "type": "boolean",
+      "title": "Flap sound",
+      "description": "Play a short mechanical clack when the board starts flipping (macOS only). Off by default.",
+      "default": false
+    }
+  }
+}
