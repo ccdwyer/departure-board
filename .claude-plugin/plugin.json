@@ -1,6 +1,6 @@
 {
   "name": "departure-board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Solari split-flap departure board for the agent's real work: tasks flip letter by letter in amber as they board, depart, get delayed or cancelled",
   "types": "./types/index.d.ts",
   "author": {
