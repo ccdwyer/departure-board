@@ -1,5 +1,9 @@
 # Departure Board
 
+![Departure Board demo](media/demo.gif)
+
+*Claude makes a 4-step task list and the split-flap band cascades each row from BOARDING to DEPARTED.* [Watch the MP4](https://github.com/ccdwyer/claude-mods/raw/main/media/departure-board.mp4)
+
 A Solari split-flap departure board for what Claude is actually doing. Every character is a flap that falls through the drum, letter by letter in amber on black, at about 30 fps, with a left-to-right cascade.
 
 - **Rows are real work items.** Claude's task list is used while it has items still to go (TodoWrite, or TaskCreate and TaskUpdate; a TaskList snapshot drops tasks deleted elsewhere). Without one, or once it's all done, each prompt you send is a departure, opened when the turn that carries it starts, so a prompt typed mid-turn waits its turn. Two todos with identical text are told apart by position, since TodoWrite has no ids.
