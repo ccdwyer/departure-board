@@ -324,3 +324,111 @@ test('a finished task list gives the board back to the turns, and a TaskList sna
   await $.tool.call({ tool: 'TaskList' } as never)
   expect(await paneText($)).not.toMatch(/OLD TASK|Old task/)
 })
+
+test('a task list made by a prompt stands in for that prompt: the turn gets no row of its own', async ($, on) => {
+  world(on)
+  on('tool.call', () => ok)
+  await prompt($, 'build the checkout flow', 't1')
+  await $.tool.call(todos([['Add cart', 'in_progress'], ['Add payment', 'pending']]))
+  await $.tool.call(todos([['Add cart', 'completed'], ['Add payment', 'completed']]))
+  await end($, 't1', 'answer')
+  const text = await paneText($)
+  expect(text).toMatch(/ADD CART|Add cart/)
+  expect(text).not.toMatch(/build the checkout flow/)
+  // A later prompt with no task list is its own departure again.
+  await prompt($, 'now write the docs', 't2')
+  expect(await paneText($)).toMatch(/now write the docs/)
+})
+
+test('the pane opens as tall as its departures, and asks again when the board grows', async ($, on) => {
+  world(on)
+  const asked: number[] = []
+  on('ui.open', (_$, e) => {
+    asked.push(e.rows ?? -1)
+    return { value: { isPlaced: true } }
+  })
+  on('command.run', () => ({ text: 'engine' }))
+  on('tool.call', () => ok)
+  await $.tool.call(todos([['One', 'in_progress'], ['Two', 'pending']]))
+  await $.command.run({ command: 'board', args: '' } as never)
+  expect(asked).toEqual([6])
+  const many = Array.from({ length: 9 }, (_, i): [string, 'pending'] => [`Step ${i}`, 'pending'])
+  await $.tool.call(todos([['One', 'in_progress'], ...many]))
+  expect(asked).toEqual([6, 13])
+})
+
+test('a pane short of room drops its title and gives the row to the board', async ($, on) => {
+  world(on)
+  on('tool.call', () => ok)
+  await $.tool.call(todos([['A', 'in_progress'], ['B', 'pending'], ['C', 'pending'], ['D', 'pending'], ['E', 'pending']]))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: 5 } } })
+  expect(await ui.find({ type: 'Text', text: /^✈ DEPARTURES$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /✈ 5 departures/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('only the turn that started the list leaves; a later turn that updates the list keeps its row', async ($, on) => {
+  world(on)
+  on('tool.call', () => ok)
+  await prompt($, 'plan the release', 'tA')
+  await $.tool.call(todos([['Tag it', 'in_progress'], ['Notes', 'pending']]))
+  await end($, 'tA', 'answer')
+  await prompt($, 'keep going with the release', 'tB')
+  await $.tool.call(todos([['Tag it', 'completed'], ['Notes', 'completed']]))
+  await end($, 'tB', 'answer')
+  const text = await paneText($)
+  expect(text).not.toMatch(/plan the release/)
+  expect(text).toMatch(/keep going with the release/)
+})
+
+test('a list with nothing on its way yet keeps the turn row, so errors still delay something', async ($, on) => {
+  world(on)
+  on('tool.call', (_$, e) => (e.tool === 'Bash' ? fail : ok))
+  await prompt($, 'set up the project', 't1')
+  await $.tool.call(todos([['Init', 'pending'], ['Lint', 'pending']]))
+  await $.tool.call({ tool: 'Bash', command: 'npm init -y' })
+  const text = await paneText($)
+  expect(text).toMatch(/set up the project/)
+  expect(text).toMatch(/DELAYED/)
+})
+
+test('the open pane asks again when prompts or a task snapshot grow the board', async ($, on) => {
+  world(on)
+  const asked: number[] = []
+  on('ui.open', (_$, e) => {
+    asked.push(e.rows ?? -1)
+    return { value: { isPlaced: true } }
+  })
+  on('command.run', () => ({ text: 'engine' }))
+  on('tool.call', (_$, e) => {
+    if (e.tool === 'TaskList') return { result: { tasks: Array.from({ length: 8 }, (_, i) => ({ id: String(i), subject: `Task ${i}`, status: 'pending' })) }, text: '' }
+    return ok
+  })
+  await $.command.run({ command: 'board', args: '' } as never)
+  for (let i = 0; i < 5; i += 1) {
+    await prompt($, `job ${i}`, `t${i}`)
+    await end($, `t${i}`, 'answer')
+  }
+  expect(asked[asked.length - 1]).toBe(8)
+  await $.tool.call({ tool: 'TaskList' } as never)
+  expect(asked[asked.length - 1]).toBe(11)
+})
+
+test('inline, the pane lays out to the rows it asked for, and a tiny body never overflows', async ($, on) => {
+  world(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.run', () => ({ text: 'engine' }))
+  on('tool.call', () => ok)
+  await $.tool.call(todos([['A', 'in_progress'], ['B', 'pending'], ['C', 'pending'], ['D', 'pending']]))
+  await $.command.run({ command: 'board', args: '' } as never)
+  // Before the host has measured the tree it reports 0: the board still gets every departure (4 + header).
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, placement: 'inline', scroll: { offset: 0, bodyRows: 0 } } })
+  expect((await ui.find({ type: 'Raster', key: 'board' }))?.props?.rows).toBe(5)
+  await ui.unmount()
+  // A 3-row window: board and footer only, 3 rows in all.
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, placement: 'inline', scroll: { offset: 0, bodyRows: 3 } } })
+  const raster = await ui.find({ type: 'Raster', key: 'board' })
+  const texts = await ui.findAll({ type: 'Text' })
+  expect((raster?.props?.rows as number) + texts.length).toBeLessThanOrEqual(3)
+  await ui.unmount()
+})

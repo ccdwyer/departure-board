@@ -15,8 +15,11 @@ const MIN_COLUMNS = 21
 // Prompts that are a person's own words: each one is a new departure when no task list exists.
 const PERSON = ['composer', 'bridge', 'sdk', 'channel', 'slack-ping']
 const TASK_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList'])
-// The pane opens this tall inline: a header, a handful of departures and the footer.
-const PANE_ROWS = 14
+// The inline pane asks to be as tall as its departures, between these bounds; a longer board scrolls its oldest away.
+const MIN_PANE_ROWS = 6
+const MAX_PANE_ROWS = 30
+// Rows around the departures: the title, the board's header row and the footer.
+const PANE_CHROME_ROWS = 3
 
 type Site = { requestId: string; key: string; flaps: Flaps }
 type Call = { tool: string; [k: string]: unknown }
@@ -33,6 +36,14 @@ let isClackOn = false
 const waitingPrompts: string[] = []
 // The main loop's running turn, so a plain tool call belongs to its row.
 let runningTurn: string | null = null
+// While the pane is open, the body rows it last asked for: a longer board asks again.
+let askedRows: number | null = null
+// The height of the tree the pane drew last: an inline host reports min(granted, measured), so only a report
+// smaller than what was drawn is a real, smaller window.
+let lastPaneHeight = 0
+
+// The turn whose prompt started the current task list: its row leaves once the list has something on its way.
+let listOwner: string | null = null
 
 /** A task list is "on" while some todo or task is still to go; a finished list gives the board back to the turns. */
 function hasLiveTaskList(all: BoardRow[]): boolean {
@@ -41,7 +52,15 @@ function hasLiveTaskList(all: BoardRow[]): boolean {
 
 /** The rows a board shows: the live task list when there is one, else everything (turns and finished items). */
 function shownRows(all: BoardRow[]): BoardRow[] {
-  return hasLiveTaskList(all) ? all.filter(r => r.source !== 'turn') : all
+  // The turn that started the list stays up until the list has something on its way (then it leaves the board).
+  return hasLiveTaskList(all) ? all.filter(r => r.source !== 'turn' || r.id === listOwner) : all
+}
+
+/** The list's creator leaves the board once the list has an item on its way; until then it keeps the platform and errors. */
+function absorbOwner(list: BoardRow[]): BoardRow[] {
+  if (listOwner === null) return list
+  const id = listOwner
+  return list.some(r => r.source !== 'turn' && isLive(r)) ? list.filter(r => r.id !== id) : list
 }
 
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
@@ -108,12 +127,39 @@ function place(id: string, requestId: string, key: string, columns: number, heig
   return site
 }
 
+/** The body rows the pane wants for this board: every shown departure plus its title, header row and footer. */
+export function wantedRows(all: BoardRow[]): number {
+  return Math.min(MAX_PANE_ROWS, Math.max(MIN_PANE_ROWS, shownRows(all).length + PANE_CHROME_ROWS))
+}
+
 async function openBoard($: EngineInterface): Promise<boolean> {
   try {
-    const opened = await $.ui.open({ id: PANE, title: 'Departures', rows: PANE_ROWS })
+    const want = wantedRows(await read($, rows))
+    const opened = await $.ui.open({ id: PANE, title: 'Departures', rows: want })
+    askedRows = opened.isPlaced ? want : null
     return opened.isPlaced
   } catch {
     return false
+  }
+}
+
+/** While the pane is open, ask for more rows once the board has outgrown what it asked for. */
+async function growBoard($: EngineInterface): Promise<void> {
+  try {
+    if (askedRows === null) {
+      // After a reload the module forgot what it asked for; a pane still on screen is still open.
+      const panes = await $.ui.panes()
+      const open = panes.some(p => p.id === PANE && p.isPlaced)
+      if (!open) return
+      askedRows = wantedRows(await read($, rows))
+      return
+    }
+    const want = wantedRows(await read($, rows))
+    if (want <= askedRows) return
+    const opened = await $.ui.open({ id: PANE, title: 'Departures', rows: want })
+    if (opened.isPlaced) askedRows = want
+  } catch {
+    // The board keeps its size; it still scrolls the oldest away.
   }
 }
 
@@ -193,6 +239,8 @@ export const register: Register = (on, options) => {
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     sites.delete(PANE)
+    askedRows = null
+    lastPaneHeight = 0
     return next(e)
   })
 
@@ -221,6 +269,7 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       const row: BoardRow = { id: `turn:${e.turnId}`, time: clockTime(now), destination: words, platform: '', status: 'BOARDING', source: 'turn', at: now, isTroubled: false, isActive: true }
       await update($, rows, list => trim([...list.filter(r => r.id !== row.id), row]))
+      await growBoard($)
     } catch {
       // Ignore.
     }
@@ -237,11 +286,16 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       const failed = ran.isError === true
 
+      // A task list stands in for the prompt that started it: only that turn (not one that later updates the list).
+      const madeBy = runningTurn === null ? null : `turn:${runningTurn}`
+      const startsList = (list: BoardRow[]) => !hasLiveTaskList(list)
+
       if (e.tool === 'TodoWrite') {
         if (failed) return ran
         const todos = Array.isArray(e.todos) ? e.todos : []
         const ids = todoIds(todos.map(t => t.content))
         await update($, rows, list => {
+          if (todos.length > 0 && startsList(list)) listOwner = madeBy
           const keep = list.filter(r => r.source !== 'todo')
           const before = new Map(list.filter(r => r.source === 'todo').map(r => [r.id, r]))
           const fresh = todos.map((t, i): BoardRow => {
@@ -262,8 +316,9 @@ export const register: Register = (on, options) => {
               isActive: false,
             }
           })
-          return trim([...keep, ...fresh])
+          return trim(absorbOwner([...keep, ...fresh]))
         })
+        await growBoard($)
         return ran
       }
 
@@ -271,7 +326,11 @@ export const register: Register = (on, options) => {
         const task = failed ? undefined : (ran.result as { task?: TaskRow } | undefined)?.task
         if (task?.id !== undefined) {
           const row: BoardRow = { id: `task:${task.id}`, time: clockTime(now), destination: task.subject ?? e.subject, platform: '', status: 'ON TIME', source: 'task', at: now, isTroubled: false, isActive: false }
-          await update($, rows, list => trim([...list.filter(r => r.id !== row.id), row]))
+          await update($, rows, list => {
+            if (startsList(list)) listOwner = madeBy
+            return trim(absorbOwner([...list.filter(r => r.id !== row.id), row]))
+          })
+          await growBoard($)
         }
         return ran
       }
@@ -286,8 +345,9 @@ export const register: Register = (on, options) => {
           const isTroubled = e.status === undefined ? base.isTroubled : e.status === 'in_progress' && base.isTroubled
           const status: BoardStatus = e.status === undefined ? base.status : statusOf(e.status, isTroubled)
           const row = { ...base, destination: e.subject ?? base.destination, status, isTroubled, at: now }
-          return trim([...list.filter(r => r.id !== id), row])
+          return trim(absorbOwner([...list.filter(r => r.id !== id), row]))
         })
+        await growBoard($)
         return ran
       }
 
@@ -307,8 +367,9 @@ export const register: Register = (on, options) => {
             })
             const ids = new Set(listed.map(r => r.id))
             // A full, successful snapshot: tasks it no longer lists were deleted, so they leave the board.
-            return trim([...list.filter(r => !ids.has(r.id) && r.source !== 'task'), ...listed])
+            return trim(absorbOwner([...list.filter(r => !ids.has(r.id) && r.source !== 'task'), ...listed]))
           })
+          await growBoard($)
         }
         return ran
       }
@@ -327,6 +388,7 @@ export const register: Register = (on, options) => {
         if (runningTurn === e.turnId) runningTurn = null
         // Only this turn's own row ends: a DELAYED turn that ends still departs (or is cancelled).
         await update($, rows, list => (list.some(r => r.id === id) ? list.map(r => (r.id === id ? { ...r, status: end, isActive: false, at: now } : r)) : list))
+        await growBoard($)
       } catch {
         // Ignore.
       }
@@ -372,42 +434,55 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     const columns = Math.min(512, e.props.bodyColumns)
     // The pane's own body, less the title and the footer: never the whole terminal.
-    const body = e.props.scroll?.bodyRows ?? Math.max(6, Math.floor((e.viewport?.rows ?? 24) / 3))
-    const room = Math.max(3, Math.min(256, body - 2))
-    const list = boardOrder(all, room - 1)
+    const given = e.props.scroll?.bodyRows ?? 0
+    const asked = askedRows ?? wantedRows(await read($, rows))
+    // Inline, lay out to the height asked for (the host may report the body it measured, not the rows it granted);
+    // a smaller real window wins. Docked, the body is the real allocation.
+    const body = e.props.placement === 'inline' ? (given > 0 && given < lastPaneHeight ? given : asked) : given > 0 ? given : Math.max(6, Math.floor((e.viewport?.rows ?? 24) / 3))
+    const isRaster = e.surface === 'terminal' && columns >= MIN_COLUMNS
+    // Short of room for every departure, drop the title line and give its row to the board; tighter still, the footer.
+    const isCompact = body < all.length + PANE_CHROME_ROWS
+    const hasFooter = body >= (isRaster ? 3 : 2)
+    const boardRows = Math.max(1, Math.min(256, body - (isCompact ? 0 : 1) - (hasFooter ? 1 : 0)))
+    // The flap board spends one row on its column header; the text board does not.
+    const list = boardOrder(all, Math.max(0, isRaster ? boardRows - 1 : boardRows))
     const boarding = all.filter(r => r.status === 'BOARDING').length
     const departed = all.filter(r => r.status === 'DEPARTED').length
     const delayed = all.filter(r => r.status === 'DELAYED').length
     const more = all.length - list.length
     const footer = `${all.length} departures · ${boarding} boarding · ${departed} departed · ${delayed} delayed${more > 0 ? ` · ${more} not shown` : ''}`
 
-    if (e.surface !== 'terminal' || columns < MIN_COLUMNS) {
+    if (!isRaster) {
+      lastPaneHeight = (isCompact ? 0 : 1) + Math.max(1, list.length) + (hasFooter ? 1 : 0)
       const l = layout(Math.max(MIN_COLUMNS, columns))
       return (
         <Box flexDirection="column">
-          <Text bold>DEPARTURES</Text>
+          {!isCompact && <Text bold>DEPARTURES</Text>}
           {list.length === 0 && <Text dimColor>No departures yet. Give Claude a task.</Text>}
           {list.map(r => (
             <Text>
               {r.time} {clip(r.destination, Math.max(20, l.destination))} · {clip(r.platform, 24)} · {r.status}
             </Text>
           ))}
-          <Text dimColor>{footer}</Text>
+          {hasFooter && <Text dimColor>{footer}</Text>}
         </Box>
       )
     }
 
     const { Raster } = $.ui.resolve(e)
-    const height = Math.max(2, Math.min(room, list.length + 1))
+    const height = Math.max(1, Math.min(boardRows, list.length + 1))
+    lastPaneHeight = (isCompact ? 0 : 1) + height + (hasFooter ? 1 : 0)
     const site = place(PANE, e.requestId, 'board', columns, height, list, true)
     schedule($)
     return (
       <Box flexDirection="column">
-        <Text bold color="#ffb000">
-          ✈ DEPARTURES
-        </Text>
+        {!isCompact && (
+          <Text bold color="#ffb000">
+            ✈ DEPARTURES
+          </Text>
+        )}
         <Raster key="board" columns={columns} rows={height} cells={site.flaps.encode()} />
-        <Text dimColor>{list.length === 0 ? 'No departures yet. Give Claude a task.' : footer}</Text>
+        {hasFooter && <Text dimColor>{list.length === 0 ? 'No departures yet. Give Claude a task.' : `${isCompact ? '✈ ' : ''}${footer}`}</Text>}
       </Box>
     )
   })
